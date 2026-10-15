@@ -1,0 +1,226 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Size enum
+enum Size {
+  S
+  M
+  L
+  XL
+  XXL
+}
+
+// Role enum
+enum Role {
+  SELLER
+  ADMIN
+  SCANNER
+}
+
+// Stock ledger entry type
+enum LedgerType {
+  STOCK_IN
+  ASSIGN
+  SALE
+}
+
+// SMS status
+enum SmsStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+}
+
+// Audit action types
+enum AuditAction {
+  LOGIN
+  LOGIN_FAILED
+  LOGOUT
+  REGISTER
+  SALE_CREATED
+  STOCK_IN
+  STOCK_ASSIGNED
+  CSV_EXPORT
+  SMS_SENT
+  SMS_FAILED
+  PASSWORD_CHANGED
+}
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  fullName       String   @map("full_name")
+  phone          String   @unique
+  passwordHash   String   @map("password_hash")
+  role           Role     @default(SELLER)
+  sellingPointName String? @map("selling_point_name")
+  totpSecret     String?  @map("totp_secret")  // For admin 2FA
+  totpEnabled    Boolean  @default(false) @map("totp_enabled")
+  scannerApproved Boolean  @default(false) @map("scanner_approved")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  
+  sales          Sale[]
+  sessions       Session[]
+  auditLogs      AuditLog[]
+  stockLedgerEntries StockLedger[]
+  scanRecords      ScanRecord[]
+  
+  @@map("users")
+}
+
+model AdminRegistrationState {
+  id                 Int      @id @default(1)
+  registrationClosed Boolean  @default(false) @map("registration_closed")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("admin_registration_state")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  
+  user      User     @relation(fields: [userId], references: [id])
+  
+  @@index([userId])
+  @@map("sessions")
+}
+
+model BuyerLimit {
+  id          String @id @default(uuid()) @db.Uuid
+  phone       String @unique
+  totalBought Int    @default(0) @map("total_bought")
+  
+  @@map("buyer_limits")
+}
+
+model Sale {
+  id                   String   @id @default(uuid()) @db.Uuid
+  orderId              String   @unique @map("order_id")
+  sellerId             String   @map("seller_id") @db.Uuid
+  sellingPointSnapshot String   @map("selling_point_snapshot")
+  buyerPhone           String   @map("buyer_phone")
+  quantity             Int
+  idempotencyKey       String   @unique @map("idempotency_key")
+  ipAddress            String?  @map("ip_address")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+  
+  seller               User     @relation(fields: [sellerId], references: [id])
+  items                SaleItem[]
+  smsLogs              SmsLog[]
+  scanRecord            ScanRecord?
+  
+  @@index([buyerPhone])
+  @@index([sellerId])
+  @@index([createdAt])
+  @@map("sales")
+}
+
+model SaleItem {
+  id        String   @id @default(uuid()) @db.Uuid
+  saleId    String   @map("sale_id") @db.Uuid
+  size      Size
+  serialNo  Int      @map("serial_no") // Auto-incremented per sale
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  
+  sale      Sale     @relation(fields: [saleId], references: [id])
+  
+  @@index([saleId])
+  @@map("sale_items")
+}
+
+model ScanRecord {
+  id        String   @id @default(uuid()) @db.Uuid
+  saleId    String   @unique @map("sale_id") @db.Uuid
+  scannerId String   @map("scanner_id") @db.Uuid
+  scannedAt DateTime @default(now()) @map("scanned_at") @db.Timestamptz
+
+  sale    Sale @relation(fields: [saleId], references: [id])
+  scanner User @relation(fields: [scannerId], references: [id])
+
+  @@index([scannerId])
+  @@map("scan_records")
+}
+
+model SellingPointStock {
+  id               String @id @default(uuid()) @db.Uuid
+  sellingPointName String @map("selling_point_name")
+  size             Size
+  quantity         Int    @default(0)
+  
+  @@unique([sellingPointName, size])
+  @@map("selling_point_stock")
+}
+
+model CentralStock {
+  id       String @id @default(uuid()) @db.Uuid
+  size     Size   @unique
+  quantity Int    @default(0)
+  
+  @@map("central_stock")
+}
+
+model StockLedger {
+  id               String     @id @default(uuid()) @db.Uuid
+  type             LedgerType
+  size             Size
+  quantity         Int
+  sellingPointName String?    @map("selling_point_name")
+  referenceId      String?    @map("reference_id") @db.Uuid  // sale_id or assignment_id
+  userId           String     @map("user_id") @db.Uuid  // who performed this
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  
+  @@index([type])
+  @@index([sellingPointName])
+  @@index([createdAt])
+  @@map("stock_ledger")
+
+  user             User       @relation(fields: [userId], references: [id])
+}
+
+model SmsLog {
+  id               String    @id @default(uuid()) @db.Uuid
+  saleId           String?   @map("sale_id") @db.Uuid
+  recipient        String
+  message          String
+  status           SmsStatus @default(QUEUED)
+  providerResponse String?   @map("provider_response")
+  attempts         Int       @default(0)
+  lastAttemptAt    DateTime? @map("last_attempt_at") @db.Timestamptz
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  
+  sale             Sale?     @relation(fields: [saleId], references: [id])
+  
+  @@index([saleId])
+  @@index([recipient])
+  @@index([status])
+  @@map("sms_logs")
+}
+
+model AuditLog {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String?     @map("user_id") @db.Uuid
+  action    AuditAction
+  details   Json?       @db.JsonB
+  ipAddress String?     @map("ip_address")
+  createdAt DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  
+  user      User?       @relation(fields: [userId], references: [id])
+  
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
